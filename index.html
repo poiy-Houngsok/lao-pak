@@ -840,13 +840,22 @@ var state = {
   requests: [],
   unlocks: [],
   holidays: [],
-  loaded: {employees:false, departments:false, requests:false, pins:false, holidays:false},
+  otRequests: [],
+  otTab: "request",
+  otFrom: firstOfMonth(new Date()),
+  otTo: todayISO(),
+  otDept: "all",
+  policies: [],
+  policyOpenId: null,
+  loaded: {employees:false, departments:false, requests:false, pins:false, holidays:false, otRequests:false, policies:false},
   pins: {},
   unlocked: null,
   pin: {buf:"", mode:"", first:"", busy:false, err:"", shake:false},
   dFrom: todayISO(), dTo: todayISO(), dDept: "all", dPerson: "", dQuick: "today",
   meId: lsGet("laophak_emp_id") || null,
   view: "home",
+  section: null,
+  dir: {step:"company"},
   modal: null,
   reportFrom: firstOfMonth(new Date()),
   reportTo: todayISO(),
@@ -931,6 +940,18 @@ function subscribeAll(){
     state.holidays = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
     state.loaded.holidays = true; render();
   }, function(){ state.loaded.holidays = true; render(); });
+
+  state.db.collection("otRequests").onSnapshot(function(snap){
+    state.otRequests = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+    state.otRequests.sort(function(a,b){ return (b.submittedAt||"").localeCompare(a.submittedAt||""); });
+    state.loaded.otRequests = true; render();
+  }, function(){ state.loaded.otRequests = true; render(); });
+
+  state.db.collection("policies").onSnapshot(function(snap){
+    state.policies = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+    state.policies.sort(function(a,b){ return (a.order||0)-(b.order||0) || (a.title||"").localeCompare(b.title||""); });
+    state.loaded.policies = true; render();
+  }, function(){ state.loaded.policies = true; render(); });
 }
 /* An approved unlock lets one employee submit leave that overlaps a colleague's, for that exact range */
 function hasUnlock(empId, from, to){
@@ -1006,7 +1027,7 @@ function clearFail(id){ lsDel("laophak_fail_"+id); }
 function unlockAs(id){
   state.unlocked=id; ssSet("laophak_unlocked", id);
   state.pin={buf:"", mode:"", first:"", busy:false, err:"", shake:false};
-  state.view="home"; state._dInit=false;
+  state.view="home"; state._dInit=false; state.section=null; state.dir={step:"company"};
   var e=empById(id);
   if(e && isHead(e) && !e.deptConfirmed) state.modal={type:"headSetup", id:id};
   render();
@@ -1348,44 +1369,97 @@ function pendingHrCount(){
 function pendingUnlockCount(emp){
   return state.unlocks.filter(function(u){ return u.status==="pending" && u.department===emp.department; }).length;
 }
+var SECTIONS = [
+  {id:"employees", label:"ຂໍ້ມູນພະນັກງານ", emoji:"👥", desc:"ປະຫວັດ ແລະ ຂໍ້ມູນພະນັກງານທັງໝົດ"},
+  {id:"leave", label:"ລາພັກ", emoji:"🏖️", desc:"ສົ່ງ-ອະນຸມັດໃບລາ, ປະຫວັດ, ລາຍງານ"},
+  {id:"ot", label:"ການເຮັດ OT", emoji:"🕐", desc:"ສະເໜີ-ອະນຸມັດການເຮັດວຽກລ່ວງເວລາ"},
+  {id:"policy", label:"ກົດລະບຽບຂອງບໍລິສັດ", emoji:"📋", desc:"ລະບຽບ ແລະ ແນວທາງປະຕິບັດຂອງບໍລິສັດ"},
+  {id:"salary", label:"ເງິນເດືອນ", emoji:"💰", desc:"ຂໍ້ມູນເງິນເດືອນ ແລະ ສະລິບ"}
+];
+function goSection(id){ state.section=id; state.view="home"; state.dir={step:"company"}; state.modal=null; }
+function sectionMenuView(emp){
+  return '<div class="card" style="margin-bottom:14px"><h3 style="margin:0 0 4px">ສະບາຍດີ, '+esc(shortName(emp.firstName+" "+emp.lastName))+'</h3><div class="faint">ເລືອກຫົວຂໍ້ທີ່ຕ້ອງການຈັດການຂ້າງລຸ່ມນີ້</div></div>'+
+    '<div class="grid grid-2" style="gap:14px">'+
+    SECTIONS.map(function(s,i){
+      return '<button type="button" class="card" data-action="goSection" data-section="'+s.id+'" style="text-align:left;cursor:pointer;display:flex;gap:12px;align-items:center;padding:18px">'+
+        '<span style="font-size:34px;line-height:1">'+s.emoji+'</span>'+
+        '<span><div style="font-weight:700;font-size:15px">'+(i+1)+'. '+esc(s.label)+'</div><div class="faint" style="margin-top:2px">'+esc(s.desc)+'</div></span>'+
+      '</button>';
+    }).join("")+
+  '</div>';
+}
+function comingSoonView(title){
+  return '<div class="card" style="text-align:center;padding:40px 20px">'+
+    '<div style="font-size:40px">🚧</div>'+
+    '<h3 style="margin:10px 0 6px">'+esc(title)+'</h3>'+
+    '<div class="faint">ກຳລັງພັດທະນາ ຈະເປີດໃຊ້ໄດ້ໄວໆນີ້</div>'+
+  '</div>';
+}
 function shellView(){
   var emp = me();
   if(!emp) return loginView();
-  var tabs = tabsFor(emp);
-  if(tabs.every(function(t){return t.id!==state.view;})) state.view="home";
-  var tabsHtml = tabs.map(function(t){
-    return '<button type="button" class="tab'+(state.view===t.id?' active':'')+'" data-action="tab" data-tab="'+t.id+'">'+ico(t.id)+'<span>'+t.label+'</span>'+
-      (t.count? '<span class="count">'+t.count+'</span>':'')+'</button>';
-  }).join("");
   var bell = unreadCount(emp);
   checkChime(emp);
 
-  var body = "";
-  if(state.view==="home") body = homeView(emp);
-  else if(state.view==="request") body = requestView(emp);
-  else if(state.view==="mine") body = mineView(emp);
-  else if(state.view==="daily") body = dailyView(emp);
-  else if(state.view==="head") body = headView(emp);
-  else if(state.view==="hr") body = hrView(emp);
-  else if(state.view==="employees") body = employeesView(emp);
-  else if(state.view==="reports") body = reportsView(emp);
+  var tabsHtml = "", body = "", showBack = !!state.section;
+
+  if(!state.section){
+    body = sectionMenuView(emp);
+  } else if(state.section==="employees"){
+    body = directoryView(emp);
+  } else if(state.section==="ot"){
+    var otTabs = otTabsFor(emp);
+    if(otTabs.every(function(t){return t.id!==state.otTab;})) state.otTab="request";
+    tabsHtml = otTabs.map(function(t){
+      return '<button type="button" class="tab'+(state.otTab===t.id?' active':'')+'" data-action="otTab" data-tab="'+t.id+'">'+esc(t.label)+
+        (t.count? '<span class="count">'+t.count+'</span>':'')+'</button>';
+    }).join("");
+    if(state.otTab==="request") body = otRequestView(emp);
+    else if(state.otTab==="mine") body = otMineView(emp);
+    else if(state.otTab==="head") body = otHeadView(emp);
+    else if(state.otTab==="hr") body = otHrView(emp);
+  } else if(state.section==="policy"){
+    body = policyView(emp);
+  } else if(state.section==="salary"){
+    body = comingSoonView("ເງິນເດືອນ");
+  } else { // leave
+    var tabs = tabsFor(emp);
+    if(tabs.every(function(t){return t.id!==state.view;})) state.view="home";
+    tabsHtml = tabs.map(function(t){
+      return '<button type="button" class="tab'+(state.view===t.id?' active':'')+'" data-action="tab" data-tab="'+t.id+'">'+ico(t.id)+'<span>'+t.label+'</span>'+
+        (t.count? '<span class="count">'+t.count+'</span>':'')+'</button>';
+    }).join("");
+    if(state.view==="home") body = homeView(emp);
+    else if(state.view==="request") body = requestView(emp);
+    else if(state.view==="mine") body = mineView(emp);
+    else if(state.view==="daily") body = dailyView(emp);
+    else if(state.view==="head") body = headView(emp);
+    else if(state.view==="hr") body = hrView(emp);
+    else if(state.view==="employees") body = employeesView(emp);
+    else if(state.view==="reports") body = reportsView(emp);
+  }
 
   return '<div class="wrap">'+
     '<div class="topbar">'+
-      '<div class="brand">'+brandIco(42)+'<div><div class="title">ຂະໜົມລາວ ລາພັກ</div><div class="sub">ລະບົບຈັດການການລາພັກ</div></div></div>'+
+      '<div class="brand">'+(showBack? '<button type="button" class="btn btn-ghost btn-sm" data-action="backToMenu" style="margin-right:8px">← ກັບ</button>':'')+brandIco(42)+'<div><div class="title">ຂະໜົມລາວ ລາພັກ</div><div class="sub">'+(showBack? esc((SECTIONS.find(function(s){return s.id===state.section;})||{label:"ລາພັກ"}).label) : 'ລະບົບຈັດການພາຍໃນ')+'</div></div></div>'+
       '<div style="display:flex;align-items:center;gap:10px">'+
         '<button type="button" class="bell" data-action="bell" title="ແຈ້ງເຕືອນ" aria-label="ແຈ້ງເຕືອນ">'+ico('bell')+(bell>0? '<span class="dot">'+bell+'</span>':'')+'</button>'+
         '<button type="button" class="user-chip" data-action="myPin" title="ປ່ຽນລະຫັດ"><div class="who"><div class="name">'+esc(emp.firstName+" "+emp.lastName)+'</div><div class="role">'+ROLE_LABEL[emp.role]+' · '+esc(emp.departmentName||deptName(emp.department))+'</div></div><div class="avatar">'+initials(emp.firstName)+'</div></button>'+
         '<button type="button" class="btn btn-ghost btn-sm" data-action="logout">ອອກ</button>'+
       '</div>'+
     '</div>'+
-    '<div class="tabs-shell"><div class="tabs" id="tabStrip">'+tabsHtml+'</div></div>'+
+    (tabsHtml? '<div class="tabs-shell"><div class="tabs" id="tabStrip">'+tabsHtml+'</div></div>' : '')+
     '<div>'+body+'</div>'+
     (state.modal? modalWrap(state.modal, emp) : '')+
   '</div>';
 }
 
 function bindShell(){
+  document.querySelectorAll('[data-action="goSection"]').forEach(function(b){
+    b.addEventListener("click", function(){ goSection(b.getAttribute("data-section")); render(); });
+  });
+  var backBtn = document.querySelector('[data-action="backToMenu"]');
+  if(backBtn) backBtn.addEventListener("click", function(){ state.section=null; state.modal=null; render(); });
   document.querySelectorAll('[data-action="tab"]').forEach(function(b){
     b.addEventListener("click", function(){ state.view=b.getAttribute("data-tab"); state.modal=null; render(); });
   });
@@ -1397,18 +1471,485 @@ function bindShell(){
   if(myPin2) myPin2.addEventListener("click", function(){ state.modal={type:"myPin", id:me().id}; render(); });
   var bellBtn = document.querySelector('[data-action="bell"]');
   if(bellBtn) bellBtn.addEventListener("click", function(){ state.modal={type:"notif", id:"x"}; markRead(me()); render(); });
-  if(state.view==="request") bindRequestForm();
-  else if(state.view==="daily") bindDaily();
-  else if(state.view==="mine") markRead(me());
-  else if(state.view==="home") bindApprovalActions();
-  else if(state.view==="head") bindApprovalActions("head");
-  else if(state.view==="hr") bindApprovalActions("hr");
-  else if(state.view==="employees") bindEmployees();
-  else if(state.view==="reports") bindReports();
+  document.querySelectorAll('[data-action="otTab"]').forEach(function(b){
+    b.addEventListener("click", function(){ state.otTab=b.getAttribute("data-tab"); state.modal=null; render(); });
+  });
+  if(state.section==="employees"){
+    bindDirectory();
+  } else if(state.section==="ot"){
+    if(state.otTab==="request") bindOtRequestForm();
+    else if(state.otTab==="head") bindOtApprovalActions("head");
+    else if(state.otTab==="hr") bindOtApprovalActions("hr");
+  } else if(state.section==="policy"){
+    bindPolicy();
+  } else if(!state.section){
+    /* menu view, nothing extra to bind */
+  } else if(state.section==="leave"){
+    if(state.view==="request") bindRequestForm();
+    else if(state.view==="daily") bindDaily();
+    else if(state.view==="mine") markRead(me());
+    else if(state.view==="home") bindApprovalActions();
+    else if(state.view==="head") bindApprovalActions("head");
+    else if(state.view==="hr") bindApprovalActions("hr");
+    else if(state.view==="employees") bindEmployees();
+    else if(state.view==="reports") bindReports();
+  }
   if(state.modal) bindModal();
 }
 
+/* ================= Employee Directory (section 1) ================= */
+function genderCounts(list){
+  return {
+    total: list.length,
+    m: list.filter(function(e){return e.gender==="male";}).length,
+    f: list.filter(function(e){return e.gender==="female";}).length
+  };
+}
+function crumbBtn(label, action, dataAttrs){
+  return '<button type="button" class="btn btn-ghost btn-sm" data-action="'+action+'"'+(dataAttrs||'')+'>'+esc(label)+'</button>';
+}
+function directoryView(emp){
+  var dir = state.dir || {step:"company"};
+  if(dir.step==="profile") return directoryProfileView(dir.empId);
+  if(dir.step==="pos") return directoryPosView(dir.deptId, dir.posKey);
+  if(dir.step==="dept") return directoryDeptView(dir.deptId);
+  return directoryCompanyView();
+}
+function directoryCompanyView(){
+  var all = state.employees;
+  var c = genderCounts(all);
+  var deptRows = state.departments.map(function(d){
+    var n = all.filter(function(e){return e.department===d.id;}).length;
+    return '<button type="button" class="list-row" data-action="dirGoDept" data-id="'+d.id+'" style="width:100%;text-align:left;cursor:pointer;border:none;background:none;color:inherit">'+
+      '<span>'+esc(d.name)+'</span><span class="faint">'+n+' ຄົນ</span></button>';
+  }).join("");
+  return '<div class="grid grid-3" style="margin-bottom:14px">'+
+      '<div class="card"><div class="stat"><div class="num">'+c.total+'</div><div class="lbl">ພະນັກງານທັງໝົດ</div></div></div>'+
+      '<div class="card"><div class="stat"><div class="num">'+c.m+'</div><div class="lbl">ຊາຍ</div></div></div>'+
+      '<div class="card"><div class="stat"><div class="num">'+c.f+'</div><div class="lbl">ຍິງ</div></div></div>'+
+    '</div>'+
+    '<div class="card"><h3 style="margin-top:0">ແຍກຕາມພະແນກ</h3>'+(deptRows||'<div class="empty">ບໍ່ມີພະແນກ</div>')+'</div>';
+}
+function directoryDeptView(deptId){
+  var d = deptById(deptId);
+  var list = state.employees.filter(function(e){return e.department===deptId;});
+  var c = genderCounts(list);
+  var byPos = {};
+  list.forEach(function(e){ var k=e.position||"-"; (byPos[k]=byPos[k]||[]).push(e); });
+  var posRows = Object.keys(byPos).sort().map(function(k){
+    return '<button type="button" class="list-row" data-action="dirGoPos" data-pos="'+esc(k)+'" style="width:100%;text-align:left;cursor:pointer;border:none;background:none;color:inherit">'+
+      '<span>'+esc(k)+'</span><span class="faint">'+byPos[k].length+' ຄົນ</span></button>';
+  }).join("");
+  return '<div style="margin-bottom:10px">'+crumbBtn("← ພະແນກທັງໝົດ","dirGoCompany")+'</div>'+
+    '<div class="grid grid-3" style="margin-bottom:14px">'+
+      '<div class="card"><div class="stat"><div class="num">'+c.total+'</div><div class="lbl">ຄົນໃນພະແນກ '+esc(d?d.name:"")+'</div></div></div>'+
+      '<div class="card"><div class="stat"><div class="num">'+c.m+'</div><div class="lbl">ຊາຍ</div></div></div>'+
+      '<div class="card"><div class="stat"><div class="num">'+c.f+'</div><div class="lbl">ຍິງ</div></div></div>'+
+    '</div>'+
+    '<div class="card"><h3 style="margin-top:0">ແຍກຕາມຕຳແໜ່ງ</h3>'+(posRows||'<div class="empty">ບໍ່ມີຕຳແໜ່ງ</div>')+'</div>';
+}
+function directoryPosView(deptId, posKey){
+  var d = deptById(deptId);
+  var list = state.employees.filter(function(e){return e.department===deptId && (e.position||"-")===posKey;});
+  var rows = list.map(function(e){
+    return '<button type="button" class="list-row" data-action="dirGoProfile" data-id="'+e.id+'" style="width:100%;text-align:left;cursor:pointer;border:none;background:none;color:inherit">'+
+      '<span style="display:flex;align-items:center;gap:8px"><span class="avatar">'+initials(e.firstName)+'</span>'+esc(e.firstName+" "+e.lastName)+'</span>'+
+      '<span class="faint">'+(e.gender==="male"?"ຊາຍ":e.gender==="female"?"ຍິງ":"-")+'</span></button>';
+  }).join("");
+  return '<div style="margin-bottom:10px">'+crumbBtn("← "+esc(d?d.name:""),"dirGoDept",' data-id="'+deptId+'"')+'</div>'+
+    '<div class="card"><h3 style="margin-top:0">'+esc(posKey)+' ('+list.length+' ຄົນ)</h3>'+(rows||'<div class="empty">ບໍ່ມີຂໍ້ມູນ</div>')+'</div>';
+}
+function dirField(label, val){
+  if(val==null || val==="") return "";
+  return '<div class="list-row"><span class="faint">'+esc(label)+'</span><span>'+esc(val)+'</span></div>';
+}
+function directoryProfileView(empId){
+  var e = empById(empId);
+  if(!e) return '<div class="card">ບໍ່ພົບຂໍ້ມູນ</div>';
+  var exp = (e.workExperience||[]).filter(function(x){return x.company||x.position||x.duties;});
+  var expHtml = exp.length ? exp.map(function(x,i){
+    return '<div class="list-row" style="display:block"><b>'+(i+1)+'. '+esc(x.company||"-")+'</b> · '+esc(x.position||"-")+
+      '<div class="faint">'+esc(x.duties||"")+'</div><div class="faint">'+(x.dateFrom?fmtDateShort(x.dateFrom):"?")+' - '+(x.dateTo?fmtDateShort(x.dateTo):"?")+'</div></div>';
+  }).join("") : '<div class="empty">ບໍ່ມີຂໍ້ມູນ</div>';
+  return '<div style="margin-bottom:10px">'+crumbBtn("← "+esc(e.position||""),"dirGoPos",' data-id="'+e.department+'" data-pos="'+esc(e.position||"-")+'"')+'</div>'+
+    '<div class="card" style="margin-bottom:14px"><div style="display:flex;align-items:center;gap:14px">'+
+      '<span class="avatar avatar-lg">'+initials(e.firstName)+'</span>'+
+      '<div><h3 style="margin:0">'+esc(e.firstName+" "+e.lastName)+'</h3><div class="faint">'+esc(e.position||"-")+' · '+esc(e.departmentName||deptName(e.department))+'</div></div>'+
+    '</div></div>'+
+    '<div class="card" style="margin-bottom:14px"><h3 style="margin-top:0">ຂໍ້ມູນທົ່ວໄປ</h3>'+
+      dirField("ເພດ", e.gender==="male"?"ຊາຍ":e.gender==="female"?"ຍິງ":"")+
+      dirField("ວັນເດືອນປີເກີດ", e.birthDate?fmtDateShort(e.birthDate):"")+
+      dirField("ວັນເດືອນປີເຂົ້າເຮັດວຽກ", e.hireDate?fmtDateShort(e.hireDate):"")+
+      dirField("ເບີໂທຕິດຕໍ່", e.phone)+
+      dirField("ອີເມວ", e.email)+
+      dirField("ນ້ຳໜັກ", e.weight?e.weight+" ກລ.":"")+
+      dirField("ລວງສູງ", e.height?e.height+" ຊມ.":"")+
+      dirField("ປະຈຸບັນຢູ່ບ້ານ", e.address)+
+      dirField("ສະຖານະ", e.maritalStatus==="single"?"ໂສດ":e.maritalStatus==="married"?"ແຕ່ງງານແລ້ວ":"")+
+    '</div>'+
+    '<div class="card" style="margin-bottom:14px"><h3 style="margin-top:0">ປະຫວັດການສຶກສາ</h3><div>'+(e.education?esc(e.education):'<div class="empty">ບໍ່ມີຂໍ້ມູນ</div>')+'</div></div>'+
+    '<div class="card" style="margin-bottom:14px"><h3 style="margin-top:0">ປະສົບການເຮັດວຽກ</h3>'+expHtml+'</div>'+
+    '<div class="card" style="margin-bottom:14px"><h3 style="margin-top:0">ຄວາມສາມາດ ແລະ ນິໄສ</h3>'+
+      dirField("ຄວາມສາມາດພິເສດ", e.specialSkills)+
+      dirField("ທັກສະການນຳໃຊ້ຄອມພິວເຕີ", e.computerSkills)+
+      dirField("ໃບຂັບຂີ່", [e.drivingCar?"ລົດໃຫຍ່":null, e.drivingMoto?"ລົດຈັກ":null].filter(Boolean).join(", "))+
+      dirField("ກິລາ/ງານອະດິເລກທີ່ມັກ", e.hobbies)+
+      dirField("ນິໄສເປັນຄົນ", e.personality)+
+    '</div>';
+}
+function bindDirectory(){
+  document.querySelectorAll('[data-action="dirGoCompany"]').forEach(function(b){
+    b.addEventListener("click", function(){ state.dir={step:"company"}; render(); });
+  });
+  document.querySelectorAll('[data-action="dirGoDept"]').forEach(function(b){
+    b.addEventListener("click", function(){ state.dir={step:"dept", deptId:b.getAttribute("data-id")}; render(); });
+  });
+  document.querySelectorAll('[data-action="dirGoPos"]').forEach(function(b){
+    b.addEventListener("click", function(){ state.dir={step:"pos", deptId:b.getAttribute("data-id")||state.dir.deptId, posKey:b.getAttribute("data-pos")}; render(); });
+  });
+  document.querySelectorAll('[data-action="dirGoProfile"]').forEach(function(b){
+    b.addEventListener("click", function(){ state.dir.step="profile"; state.dir.empId=b.getAttribute("data-id"); render(); });
+  });
+}
+/* ================= OT - overtime (section 3) ================= */
+var OT_ATT_MAX = 3;
+var otDraft = {imgs:[]};
+function otHours(start, end){
+  if(!start || !end) return 0;
+  var sp=start.split(":"), ep=end.split(":");
+  var s=(+sp[0])*60+(+sp[1]||0), e=(+ep[0])*60+(+ep[1]||0);
+  var diff = e-s; if(diff<0) diff += 24*60;
+  return Math.round(diff/60*100)/100;
+}
+function otCanAct(emp, r){
+  if(isHead(emp) && r.status==="pending_head" && !r.forDirector && r.department===emp.department) return "head";
+  if(isDirector(emp) && r.status==="pending_head" && r.forDirector && r.employeeId!==emp.id) return "head";
+  if(isHR(emp) && r.status==="pending_hr") return "hr";
+  return "";
+}
+function otPendingHeadCount(emp){ return state.otRequests.filter(function(r){ return otCanAct(emp,r)==="head"; }).length; }
+function otPendingHrCount(){ return state.otRequests.filter(function(r){ return r.status==="pending_hr"; }).length; }
+function otTabsFor(emp){
+  var tabs = [
+    {id:"request", label:"ສະເໜີ OT"},
+    {id:"mine", label:"ປະຫວັດ OT ຂອງຂ້ອຍ"}
+  ];
+  if(isHead(emp) || isDirector(emp)) tabs.push({id:"head", label:"ອະນຸມັດ OT", count: otPendingHeadCount(emp)});
+  if(isHR(emp)) tabs.push({id:"hr", label:"ອະນຸມັດ HR / ສະຫຼຸບ", count: otPendingHrCount()});
+  return tabs;
+}
+function otStatusBadge(r){
+  if(r.status==="approved") return '<span class="pin-badge yes">ອະນຸມັດແລ້ວ</span>';
+  if(r.status==="rejected") return '<span class="pin-badge no">ບໍ່ອະນຸຍາດ</span>';
+  if(r.status==="pending_hr") return '<span class="badge-role">ລໍຖ້າ HR</span>';
+  return '<span class="badge-role">ລໍຖ້າຫົວໜ້າ</span>';
+}
+function otRequestView(emp){
+  return '<div class="grid grid-2">'+
+    '<div class="card">'+
+      '<h3>ສະເໜີຂໍເຮັດ OT</h3>'+
+      '<form id="otForm">'+
+        '<div class="field"><label>ຊື່ ແລະ ຊື່ຫຼິ້ນ</label><input type="text" value="'+esc(emp.firstName+" "+emp.lastName)+'" disabled></div>'+
+        '<div class="grid grid-2"><div class="field"><label>ຕຳແໜ່ງ</label><input type="text" value="'+esc(emp.position||"-")+'" disabled></div><div class="field"><label>ພະແນກ</label><input type="text" value="'+esc(emp.departmentName||deptName(emp.department))+'" disabled></div></div>'+
+        '<div class="field"><label>ວັນທີ່ເຮັດ OT</label><input type="date" id="ot_date" value="'+todayISO()+'"></div>'+
+        '<div class="grid grid-2"><div class="field"><label>ເລີ່ມເວລາ</label><input type="time" id="ot_start" value="18:00"></div><div class="field"><label>ຫາເວລາ</label><input type="time" id="ot_end" value="20:00"></div></div>'+
+        '<div class="field"><label>ຈຳນວນຊົ່ວໂມງ (ຄິດໄລ່ອັດຕະໂນມັດ)</label><input type="text" id="ot_hours" value="2.00" disabled></div>'+
+        '<div class="field"><label>ເຫດຜົນທີ່ຕ້ອງເຮັດ OT</label><textarea id="ot_reason" rows="3" placeholder="ອະທິບາຍສັ້ນໆ..."></textarea></div>'+
+        '<div class="field"><label>ຮູບຢັ້ງຢືນ (ບໍ່ບັງຄັບ, ສູງສຸດ '+OT_ATT_MAX+' ຮູບ)</label><div class="att-pick">'+
+          '<label class="btn btn-sm att-btn">+ ຮູບ (ສູງສຸດ '+OT_ATT_MAX+')<input type="file" id="ot_imgs" accept="image/*" multiple hidden></label></div>'+
+          '<div id="otAttList"></div></div>'+
+        '<button type="submit" class="btn btn-primary btn-block">ສົ່ງຄຳຂໍ OT</button>'+
+      '</form>'+
+    '</div>'+
+    '<div class="card">'+
+      '<h3>ຂັ້ນຕອນການອະນຸມັດ</h3>'+
+      '<div class="list-row"><span>1. ສົ່ງຄຳຂໍ</span><span class="faint">ໂດຍທ່ານ</span></div>'+
+      '<div class="list-row"><span>2. ຫົວໜ້າພະແນກອະນຸມັດ</span><span class="faint">'+esc(emp.departmentName||deptName(emp.department))+'</span></div>'+
+      '<div class="list-row"><span>3. HR ອະນຸມັດຂັ້ນສຸດທ້າຍ</span><span class="faint">ຜ່ານແລ້ວຈຶ່ງຖືວ່າ OT ສຳເລັດ</span></div>'+
+    '</div>'+
+  '</div>';
+}
+function paintOtDraft(){
+  var box=document.getElementById("otAttList"); if(!box) return;
+  box.innerHTML = otDraft.imgs.map(function(f,i){
+    return '<div class="att-row"><span class="att-ic">🖼</span><span class="att-name">'+esc(f.name)+'</span><span class="faint">'+fmtKB(f.size)+'</span><button type="button" class="att-x" data-i="'+i+'" aria-label="ເອົາອອກ">×</button></div>';
+  }).join("");
+  box.querySelectorAll(".att-x").forEach(function(b){ b.addEventListener("click", function(){ otDraft.imgs.splice(parseInt(b.getAttribute("data-i"),10),1); paintOtDraft(); }); });
+}
+function bindOtAttach(){
+  var fi=document.getElementById("ot_imgs"); if(!fi) return;
+  paintOtDraft();
+  fi.addEventListener("change", function(){
+    var files=Array.prototype.slice.call(fi.files||[]); fi.value="";
+    var room=OT_ATT_MAX-otDraft.imgs.length; if(files.length>room) toast("ແນບຮູບໄດ້ສູງສຸດ "+OT_ATT_MAX+" ຮູບ", true);
+    files.slice(0,Math.max(0,room)).forEach(function(f){ shrinkImage(f).then(function(x){ if(otDraft.imgs.length<OT_ATT_MAX){ otDraft.imgs.push(x); paintOtDraft(); } }, function(){ toast("ໃຊ້ຮູບນີ້ບໍ່ໄດ້: "+f.name, true); }); });
+  });
+}
+function bindOtRequestForm(){
+  var form = document.getElementById("otForm");
+  if(!form) return;
+  bindOtAttach();
+  var s=document.getElementById("ot_start"), e=document.getElementById("ot_end"), h=document.getElementById("ot_hours");
+  function recalc(){ h.value = otHours(s.value, e.value).toFixed(2); }
+  s.addEventListener("change", recalc); e.addEventListener("change", recalc); recalc();
+  form.addEventListener("submit", function(ev){
+    ev.preventDefault();
+    var emp = me();
+    var date = document.getElementById("ot_date").value;
+    var reason = document.getElementById("ot_reason").value.trim();
+    var hours = otHours(s.value, e.value);
+    if(!date){ toast("ກະລຸນາເລືອກວັນທີ່", true); return; }
+    if(!reason){ toast("ກະລຸນາໃສ່ເຫດຜົນ", true); return; }
+    if(hours<=0){ toast("ເວລາບໍ່ຖືກຕ້ອງ", true); return; }
+    var payload = {
+      employeeId: emp.id, employeeName: emp.firstName+" "+emp.lastName,
+      position: emp.position||"-", department: emp.department, departmentName: emp.departmentName||deptName(emp.department),
+      date: date, startTime: s.value, endTime: e.value, hours: hours, reason: reason,
+      submittedAt: new Date().toISOString(),
+      status: isDirector(emp) ? "pending_hr" : "pending_head",
+      forDirector: isHead(emp)
+    };
+    var btn = form.querySelector('button[type="submit"]');
+    btn.disabled=true; btn.textContent="ກຳລັງສົ່ງ...";
+    var files = otDraft.imgs, metas=[], stamp=Date.now();
+    var ups = files.map(function(f,i){
+      var id="otatt_"+emp.id+"_"+stamp+"_"+i; metas.push({id:id, name:f.name, type:f.type, size:f.size});
+      return state.db.collection("attachments").doc(id).set({employeeId:emp.id, name:f.name, type:f.type, size:f.size, data:f.data, createdAt:new Date().toISOString()});
+    });
+    Promise.all(ups).then(function(){
+      if(metas.length) payload.photos = metas;
+      return state.db.collection("otRequests").add(payload);
+    }).then(function(){
+      otDraft={imgs:[]};
+      toast("ສົ່ງຄຳຂໍ OT ແລ້ວ. ແຈ້ງໄປຫາຫົວໜ້າພະແນກແລ້ວ");
+      state.otTab="mine"; state.modal=null; render();
+    }).catch(function(){
+      toast("ສົ່ງບໍ່ສຳເລັດ. ກວດເບິ່ງອິນເຕີເນັດ ແລ້ວລອງໃໝ່", true); btn.disabled=false; btn.textContent="ສົ່ງຄຳຂໍ OT";
+    });
+  });
+}
+function otPhotoModal(m){
+  if(m.loading) return '<h3>'+esc(m.name)+'</h3><div class="empty">ກຳລັງໂຫຼດ...</div><button type="button" class="btn btn-block" data-action="closeModalBtn">ປິດ</button>';
+  if(m.error) return '<h3>'+esc(m.name)+'</h3><div class="conflict-box">ເປີດຮູບບໍ່ໄດ້</div><button type="button" class="btn btn-block" data-action="closeModalBtn">ປິດ</button>';
+  return '<h3>'+esc(m.name)+'</h3><img src="'+m.url+'" alt="'+esc(m.name)+'" style="max-width:100%;border-radius:12px;display:block;margin:0 auto 12px">'+
+    '<button type="button" class="btn btn-block" data-action="closeModalBtn">ປິດ</button>';
+}
+function otPhotoChips(r){
+  var a=r.photos||[]; if(!a.length) return '';
+  return '<div class="att-chips">'+a.map(function(x){ return '<button type="button" class="att-chip" data-action="viewOtPhoto" data-id="'+esc(x.id)+'" data-name="'+esc(x.name)+'">🖼 '+esc(x.name)+'</button>'; }).join("")+'</div>';
+}
+function openOtPhoto(id,name){
+  state.modal={type:"otPhoto", name:name, loading:true}; render();
+  state.db.collection("attachments").doc(id).get().then(function(snap){
+    var d = snap && (typeof snap.data==="function" ? snap.data() : snap);
+    if(!d || !d.data){ state.modal={type:"otPhoto", name:name, error:true}; render(); return; }
+    state.modal={type:"otPhoto", name:name, url:d.data}; render();
+  }, function(){ state.modal={type:"otPhoto", name:name, error:true}; render(); });
+}
+function otRequestRow(r, showActions, stage){
+  return '<div class="card" style="margin-bottom:10px">'+
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">'+
+      '<div><b>'+esc(r.employeeName)+'</b><div class="faint">'+esc(r.departmentName)+' · '+esc(r.position||"-")+'</div></div>'+
+      otStatusBadge(r)+
+    '</div>'+
+    '<div class="list-row"><span>ວັນທີ່</span><span>'+fmtDateShort(r.date)+'</span></div>'+
+    '<div class="list-row"><span>ເວລາ</span><span>'+esc(r.startTime)+' - '+esc(r.endTime)+' ('+r.hours+' ຊມ.)</span></div>'+
+    '<div class="list-row" style="display:block"><span class="faint">ເຫດຜົນ</span><div>'+esc(r.reason||"-")+'</div></div>'+
+    (r.photos&&r.photos.length? '<div style="margin-top:6px">'+otPhotoChips(r)+'</div>' : '')+
+    (r.status==="rejected" && r.rejectReason? '<div class="conflict-box" style="margin-top:8px"><b>ເຫດຜົນທີ່ບໍ່ອະນຸຍາດ:</b> '+esc(r.rejectReason)+'</div>' : '')+
+    (showActions? '<div class="row" style="margin-top:10px">'+
+      '<button type="button" class="btn btn-danger" data-action="otReject" data-id="'+r.id+'" style="flex:1">ບໍ່ອະນຸຍາດ</button>'+
+      '<button type="button" class="btn btn-primary" data-action="otApprove" data-id="'+r.id+'" data-stage="'+stage+'" style="flex:1">ອະນຸມັດ</button>'+
+    '</div>' : '')+
+  '</div>';
+}
+function otMineView(emp){
+  var mine = state.otRequests.filter(function(r){ return r.employeeId===emp.id; });
+  return '<div class="card"><h3 style="margin-top:0">ປະຫວັດ OT ຂອງຂ້ອຍ ('+mine.length+')</h3>'+
+    (mine.length? mine.map(function(r){ return otRequestRow(r,false); }).join("") : '<div class="empty">ຍັງບໍ່ມີຄຳຂໍ OT</div>')+
+  '</div>';
+}
+function otDashboardRows(list){
+  var byEmp = {};
+  list.forEach(function(r){
+    if(r.status!=="approved") return;
+    var k=r.employeeId;
+    byEmp[k]=byEmp[k]||{name:r.employeeName, dept:r.departmentName, days:{}, total:0};
+    byEmp[k].days[r.date]=(byEmp[k].days[r.date]||0)+r.hours;
+    byEmp[k].total += r.hours;
+  });
+  return Object.keys(byEmp).map(function(k){ return byEmp[k]; }).sort(function(a,b){ return b.total-a.total; });
+}
+function otDashboardHtml(list, title){
+  var rows = otDashboardRows(list);
+  var tr = rows.map(function(r){
+    var dayList = Object.keys(r.days).sort().map(function(d){ return fmtDateShort(d)+" ("+Math.round(r.days[d]*100)/100+"ຊມ.)"; }).join(", ");
+    return '<tr><td>'+esc(r.name)+'</td><td>'+esc(r.dept)+'</td><td class="faint" style="font-size:12px">'+esc(dayList)+'</td><td class="mono">'+Math.round(r.total*100)/100+'</td></tr>';
+  }).join("");
+  return '<div class="card"><h3 style="margin-top:0">'+esc(title)+'</h3>'+
+    '<div class="table-wrap"><table class="emp-table"><thead><tr><th>ພະນັກງານ</th><th>ພະແນກ</th><th>ວັນທີ່ເຮັດ OT</th><th>ລວມຊົ່ວໂມງ</th></tr></thead><tbody>'+
+    (tr||'<tr><td colspan="4"><div class="empty">ບໍ່ມີຂໍ້ມູນໃນຊ່ວງນີ້</div></td></tr>')+'</tbody></table></div></div>';
+}
+function otFilterBar(showDept){
+  var deptOpts = '<option value="all"'+(state.otDept==="all"?' selected':'')+'>ທັງໝົດ (ທຸກພະແນກ)</option>'+
+    state.departments.map(function(d){ return '<option value="'+d.id+'"'+(state.otDept===d.id?' selected':'')+'>'+esc(d.name)+'</option>'; }).join("");
+  return '<div class="card" style="margin-bottom:14px"><div class="row" style="align-items:flex-end;flex-wrap:wrap">'+
+    '<div class="field" style="min-width:140px;margin:0"><label>ແຕ່ວັນທີ່</label><input type="date" id="otFrom" value="'+state.otFrom+'"></div>'+
+    '<div class="field" style="min-width:140px;margin:0"><label>ຫາວັນທີ່</label><input type="date" id="otTo" value="'+state.otTo+'"></div>'+
+    (showDept? '<div class="field" style="min-width:160px;margin:0"><label>ພະແນກ</label><select id="otDeptSel">'+deptOpts+'</select></div>' : '')+
+  '</div></div>';
+}
+function otHeadView(emp){
+  var pending = state.otRequests.filter(function(r){ return otCanAct(emp,r)==="head"; });
+  var inRange = state.otRequests.filter(function(r){ return r.department===emp.department && r.date>=state.otFrom && r.date<=state.otTo; });
+  return '<div class="card" style="margin-bottom:14px"><h3 style="margin-top:0">ລໍຖ້າອະນຸມັດ ('+pending.length+')</h3>'+
+      (pending.length? pending.map(function(r){ return otRequestRow(r,true,"head"); }).join("") : '<div class="empty">ບໍ່ມີຄຳຂໍລໍຖ້າ</div>')+
+    '</div>'+
+    otFilterBar(false)+
+    otDashboardHtml(inRange, "ແດຊບອດ OT ພະແນກ "+(emp.departmentName||deptName(emp.department)));
+}
+function otHrView(emp){
+  var pending = state.otRequests.filter(function(r){ return r.status==="pending_hr"; });
+  var inRange = state.otRequests.filter(function(r){ return r.date>=state.otFrom && r.date<=state.otTo && (state.otDept==="all"||r.department===state.otDept); });
+  return '<div class="card" style="margin-bottom:14px"><h3 style="margin-top:0">ລໍຖ້າອະນຸມັດ HR ('+pending.length+')</h3>'+
+      (pending.length? pending.map(function(r){ return otRequestRow(r,true,"hr"); }).join("") : '<div class="empty">ບໍ່ມີຄຳຂໍລໍຖ້າ</div>')+
+    '</div>'+
+    otFilterBar(true)+
+    '<div class="card" style="margin-bottom:14px"><h3 style="margin-top:0">ສົ່ງອອກ Excel (.xlsx)</h3>'+
+      '<div class="row"><button type="button" class="btn btn-primary" data-action="previewOtXlsx">ເບິ່ງຕົວຢ່າງ / ດາວໂຫຼດ Excel</button></div>'+
+    '</div>'+
+    otDashboardHtml(inRange, "ແດຊບອດ OT ລວມທຸກພະແນກ");
+}
+function doOtApprove(id, stage){
+  var emp = me();
+  var ref = state.db.collection("otRequests").doc(id);
+  var patch = {};
+  if(stage==="head"){ patch = {status:"pending_hr", headApprovedAt:new Date().toISOString(), headApprovedBy: emp.firstName+" "+emp.lastName}; }
+  else { patch = {status:"approved", hrApprovedAt:new Date().toISOString(), hrApprovedBy: emp.firstName+" "+emp.lastName}; }
+  ref.update(patch).then(function(){ toast(stage==="head" ? "ອະນຸມັດແລ້ວ. ສົ່ງຕໍ່ໄປໃຫ້ HR ກວດແລ້ວ" : "HR ອະນຸມັດແລ້ວ. ແຈ້ງພະນັກງານແລ້ວ"); });
+  render();
+}
+function doOtReject(id, reason){
+  var emp = me();
+  state.db.collection("otRequests").doc(id).update({
+    status:"rejected", rejectedAt:new Date().toISOString(), rejectedBy: emp.firstName+" "+emp.lastName, rejectReason: reason||"-"
+  }).then(function(){ toast("ບໍ່ອະນຸຍາດແລ້ວ. ແຈ້ງພະນັກງານແລ້ວ"); });
+  state.modal=null; render();
+}
+function otRejectModal(id){
+  var r = state.otRequests.find(function(x){return x.id===id;});
+  return '<h3>ບໍ່ອະນຸຍາດ OT</h3>'+
+    '<p class="faint">'+esc(r.employeeName)+' · '+fmtDateShort(r.date)+' · '+r.hours+' ຊມ.</p>'+
+    '<div class="field"><label for="otRejectReason">ເຫດຜົນທີ່ບໍ່ອະນຸຍາດ (ພະນັກງານຈະເຫັນ)</label><textarea id="otRejectReason" rows="3" placeholder="ລະບຸເຫດຜົນ..."></textarea></div>'+
+    '<div class="row"><button type="button" class="btn" data-action="closeModalBtn" style="flex:1">ຍົກເລີກ</button>'+
+    '<button type="button" class="btn btn-danger" data-action="confirmOtReject" data-id="'+id+'" style="flex:1">ຢືນຢັນ ບໍ່ອະນຸຍາດ</button></div>';
+}
+function buildOtSheets(from,to,dept){
+  var T=xlT;
+  var reqs = state.otRequests.filter(function(r){ return r.date>=from && r.date<=to && (dept==="all"||r.department===dept) && r.status==="approved"; });
+  var title=[T("ຂະໜົມລາວ ລາພັກ")+" · "+T("ສະຫຼຸບ OT")+" · "+from+" → "+to+" · "+(dept==="all"?T("ທຸກພະແນກ"):deptName(dept))];
+  var head=[T("ລຳດັບ"),T("ພະແນກ"),T("ຊື່"),T("ຕຳແໜ່ງ"),T("ລວມຊົ່ວໂມງ")];
+  var byEmp = otDashboardRows(reqs);
+  var rows=[title,[],head], no=0, grand=0;
+  byEmp.forEach(function(r){ rows.push([++no, r.dept, r.name, "", Math.round(r.total*100)/100]); grand+=r.total; });
+  rows.push(["","","","ລວມ", Math.round(grand*100)/100]);
+  var sh1={name:T("ສະຫຼຸບ OT"), rows:rows, head:3, bold:[rows.length-1], widths:[6,20,26,18,14]};
+  var dh=[T("ວັນທີ່"),T("ພະແນກ"),T("ຊື່"),T("ເລີ່ມ"),T("ຫາ"),T("ຊົ່ວໂມງ"),T("ເຫດຜົນ"),T("ຫົວໜ້າອະນຸມັດ"),T("HR ອະນຸມັດ")];
+  var drows=[dh];
+  reqs.slice().sort(function(a,b){ return a.date.localeCompare(b.date); }).forEach(function(r){
+    drows.push([r.date, r.departmentName, r.employeeName, r.startTime, r.endTime, r.hours, r.reason||"", r.headApprovedBy||"", r.hrApprovedBy||""]);
+  });
+  var sh2={name:T("ລາຍລະອຽດ"), rows:drows, head:0, widths:[12,18,26,10,10,10,34,20,20]};
+  return [sh1,sh2];
+}
+function previewOtXlsx(){
+  var emp=me(); if(!isHR(emp)) return;
+  var from=state.otFrom, to=state.otTo, dept=state.otDept;
+  if(!from || !to || from>to){ toast("ວັນທີ່ບໍ່ຖືກຕ້ອງ: ວັນສິ້ນສຸດຕ້ອງບໍ່ກ່ອນວັນເລີ່ມ", true); return; }
+  var sheets; try{ sheets=buildOtSheets(from,to,dept); }catch(err){ toast("ສ້າງຕົວຢ່າງບໍ່ສຳເລັດ", true); return; }
+  state.modal={type:"xlsxPreview", sheets:sheets, sheetIdx:0, from:from, to:to, dept:dept, kind:"ot"};
+  render();
+}
+function bindOtApprovalActions(stage){
+  document.querySelectorAll('[data-action="otApprove"]').forEach(function(b){
+    b.addEventListener("click", function(){ doOtApprove(b.getAttribute("data-id"), b.getAttribute("data-stage")); });
+  });
+  document.querySelectorAll('[data-action="otReject"]').forEach(function(b){
+    b.addEventListener("click", function(){ state.modal={type:"otReject", id:b.getAttribute("data-id")}; render(); });
+  });
+  document.querySelectorAll('[data-action="viewOtPhoto"]').forEach(function(b){
+    b.addEventListener("click", function(){ openOtPhoto(b.getAttribute("data-id"), b.getAttribute("data-name")); });
+  });
+  var pv = document.querySelector('[data-action="previewOtXlsx"]');
+  if(pv) pv.addEventListener("click", previewOtXlsx);
+  var fFrom=document.getElementById("otFrom"), fTo=document.getElementById("otTo"), fDept=document.getElementById("otDeptSel");
+  if(fFrom) fFrom.addEventListener("change", function(){ state.otFrom=fFrom.value; render(); });
+  if(fTo) fTo.addEventListener("change", function(){ state.otTo=fTo.value; render(); });
+  if(fDept) fDept.addEventListener("change", function(){ state.otDept=fDept.value; render(); });
+}
 function esc(s){ return (s==null?"":String(s)).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
+
+/* ================= ກົດລະບຽບຂອງບໍລິສັດ (section 4: Company Policies) ================= */
+function policyBody(text){
+  return esc(text||"").replace(/\n/g,"<br>");
+}
+function policyView(emp){
+  var hr = isHR(emp);
+  var head = '<div class="card" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">'+
+    '<div><h3 style="margin:0 0 4px">ກົດລະບຽບຂອງບໍລິສັດ</h3><div class="faint">ລະບຽບ ແລະ ແນວທາງປະຕິບັດ ແຍກຕາມຫົວຂໍ້ — ພະນັກງານທຸກຄົນອ່ານໄດ້</div></div>'+
+    (hr? '<button type="button" class="btn btn-primary" data-action="addPolicy">+ ເພີ່ມຫົວຂໍ້ໃໝ່</button>' : '')+
+  '</div>';
+  if(!state.loaded.policies) return head+'<div class="card"><div class="empty">ກຳລັງໂຫຼດ...</div></div>';
+  if(!state.policies.length) return head+'<div class="card"><div class="empty">'+(hr? 'ຍັງບໍ່ມີກົດລະບຽບ. ກົດ "+ ເພີ່ມຫົວຂໍ້ໃໝ່" ເພື່ອເລີ່ມໃສ່ຂໍ້ມູນ' : 'ຍັງບໍ່ມີກົດລະບຽບທີ່ເຜີຍແຜ່')+'</div></div>';
+  var rows = state.policies.map(function(p){
+    var open = state.policyOpenId===p.id;
+    return '<div class="card" style="margin-bottom:10px;padding:0;overflow:hidden">'+
+      '<button type="button" class="list-row" data-action="togglePolicy" data-id="'+p.id+'" style="width:100%;text-align:left;cursor:pointer;padding:14px 16px">'+
+        '<span style="font-weight:700">📋 '+esc(p.title||"(ບໍ່ມີຫົວຂໍ້)")+'</span>'+
+        '<span class="faint">'+(open?'▲':'▼')+'</span>'+
+      '</button>'+
+      (open? '<div style="padding:0 16px 16px;border-top:1px solid var(--border,#e5e7eb)">'+
+        '<div style="padding-top:12px;line-height:1.7">'+(p.body? policyBody(p.body) : '<span class="faint">(ຍັງບໍ່ມີເນື້ອໃນ)</span>')+'</div>'+
+        (hr? '<div class="row" style="margin-top:14px"><button type="button" class="btn btn-sm" data-action="editPolicy" data-id="'+p.id+'" style="flex:1">ແກ້ໄຂ</button>'+
+          '<button type="button" class="btn btn-sm btn-danger" data-action="delPolicy" data-id="'+p.id+'" style="flex:1">ລຶບ</button></div>' : '')+
+      '</div>' : '')+
+    '</div>';
+  }).join("");
+  return head+rows;
+}
+function bindPolicy(){
+  document.querySelectorAll('[data-action="togglePolicy"]').forEach(function(b){
+    b.addEventListener("click", function(){
+      var id=b.getAttribute("data-id");
+      state.policyOpenId = (state.policyOpenId===id)? null : id;
+      render();
+    });
+  });
+  var addBtn = document.querySelector('[data-action="addPolicy"]');
+  if(addBtn) addBtn.addEventListener("click", function(){ state.modal={type:"policyEdit", id:"new"}; render(); });
+  document.querySelectorAll('[data-action="editPolicy"]').forEach(function(b){
+    b.addEventListener("click", function(){ state.modal={type:"policyEdit", id:b.getAttribute("data-id")}; render(); });
+  });
+  document.querySelectorAll('[data-action="delPolicy"]').forEach(function(b){
+    b.addEventListener("click", function(){ state.modal={type:"delPolicy", id:b.getAttribute("data-id")}; render(); });
+  });
+}
+function policyEditModal(id){
+  var isNew = id==="new";
+  var p = isNew? {title:"", body:""} : (state.policies.find(function(x){return x.id===id;}) || {title:"", body:""});
+  return '<h3>'+(isNew?'ເພີ່ມຫົວຂໍ້ກົດລະບຽບ':'ແກ້ໄຂຫົວຂໍ້ກົດລະບຽບ')+'</h3>'+
+    '<div class="field"><label for="pl_title">ຫົວຂໍ້</label><input type="text" id="pl_title" placeholder="ເຊັ່ນ: ເວລາເຮັດວຽກ, ການລາພັກ, ລະບຽບວິໄນ..." value="'+esc(p.title)+'"></div>'+
+    '<div class="field"><label for="pl_body">ເນື້ອໃນ</label><textarea id="pl_body" rows="8" placeholder="ໃສ່ເນື້ອໃນກົດລະບຽບ...">'+esc(p.body)+'</textarea></div>'+
+    '<div class="faint" style="margin:-4px 0 10px">* ການອັບໂຫລດເປັນໄຟລ໌ຈະເພີ່ມໃຫ້ພາຍຫຼັງ</div>'+
+    '<div class="row"><button type="button" class="btn" data-action="closeModalBtn" style="flex:1">ຍົກເລີກ</button>'+
+    '<button type="button" class="btn btn-primary" data-action="savePolicy" data-id="'+id+'" style="flex:1">ບັນທຶກ</button></div>';
+}
+function delPolicyModal(id){
+  var p = state.policies.find(function(x){return x.id===id;});
+  return '<h3>ລຶບຫົວຂໍ້ກົດລະບຽບ?</h3><p class="muted">"'+esc(p? p.title : "")+'" ຈະຖືກລຶບອອກ ແລະ ພະນັກງານຈະບໍ່ເຫັນອີກ.</p>'+
+    '<div class="row"><button type="button" class="btn" data-action="closeModalBtn" style="flex:1">ຍົກເລີກ</button>'+
+    '<button type="button" class="btn btn-danger" data-action="confirmDelPolicy" data-id="'+id+'" style="flex:1">ລຶບ</button></div>';
+}
 
 /* ================= Home ================= */
 function homeView(emp){
@@ -2278,6 +2819,7 @@ function employeesView(emp){
       '<form id="empForm">'+
         '<div class="grid grid-2"><div class="field"><label>ຊື່</label><input type="text" id="e_first" required></div><div class="field"><label>ຊື່ຫຼິ້ນ</label><input type="text" id="e_last" required placeholder="ເຊັ່ນ ນ້ອຍ"></div></div>'+
         '<div class="grid grid-2"><div class="field"><label>ພະແນກ</label><select id="e_dept">'+deptOpts(null)+'</select></div><div class="field"><label for="e_pos">ຕຳແໜ່ງ</label><select id="e_pos">'+positionOptions(POSITIONS[0])+'</select></div></div>'+
+        '<div class="field"><label>ເພດ</label><select id="e_gender"><option value="">-</option><option value="male">ຊາຍ</option><option value="female">ຍິງ</option></select></div>'+
         '<div class="grid grid-2"><div class="field"><label>ບົດບາດໃນລະບົບ</label><select id="e_role">'+roleOptions("employee")+'</select></div><div class="field"><label>ສິດວັນລາພັກຜ່ອນ/ປີ</label><input type="number" id="e_quota" value="6" min="0" step="0.5"></div></div>'+
         '<div class="grid grid-2"><div class="field"><label>ບໍລິສັດ (ນິຕິບຸກຄົນ)</label><select id="e_company">'+companyOptions("")+'</select></div><div class="field"><label>ສິດວັນລາປ່ວຍ/ປີ</label><input type="number" id="e_sick" min="0" step="0.5" placeholder="ໃຫ້ HR ກຳນົດ"></div></div>'+
         '<div class="grid grid-2"><div class="field"><label>ວັນເກີດ (ບໍ່ບັງຄັບ)</label><input type="date" id="e_bday"></div><div class="field"><label>ວັນເລີ່ມເຮັດວຽກ (ບໍ່ບັງຄັບ)</label><input type="date" id="e_hired"></div></div>'+
@@ -2307,6 +2849,7 @@ function bindEmployees(){
       departmentName: d? d.name : "",
       position: document.getElementById("e_pos").value.trim(),
       role: document.getElementById("e_role").value,
+      gender: document.getElementById("e_gender").value || null,
       quotaAnnual: parseFloat(document.getElementById("e_quota").value)||0,
       company: document.getElementById("e_company").value,
       quotaSick: document.getElementById("e_sick").value==="" ? null : parseFloat(document.getElementById("e_sick").value),
@@ -2468,6 +3011,10 @@ function modalWrap(modal, emp){
   var inner = "";
   if(modal.type==="day") inner = dayModal(modal.date);
   else if(modal.type==="reject") inner = rejectModal(modal.id);
+  else if(modal.type==="otReject") inner = otRejectModal(modal.id);
+  else if(modal.type==="otPhoto") inner = otPhotoModal(modal);
+  else if(modal.type==="policyEdit") inner = policyEditModal(modal.id);
+  else if(modal.type==="delPolicy") inner = delPolicyModal(modal.id);
   else if(modal.type==="confirmApprove") inner = confirmApproveModal(modal.id, modal.stage);
   else if(modal.type==="editEmp") inner = editEmpModal(modal.id);
   else if(modal.type==="att") inner = attModal(modal);
@@ -2517,11 +3064,29 @@ function editEmpModal(id){
   return '<h3>ແກ້ໄຂຂໍ້ມູນພະນັກງານ</h3>'+
     '<div class="grid grid-2"><div class="field"><label>ຊື່</label><input type="text" id="ee_first" value="'+esc(e.firstName)+'" required></div><div class="field"><label>ຊື່ຫຼິ້ນ</label><input type="text" id="ee_last" value="'+esc(e.lastName)+'" required></div></div>'+
     '<div class="grid grid-2"><div class="field"><label>ພະແນກ</label><select id="ee_dept">'+deptOpts+'</select></div><div class="field"><label for="ee_pos">ຕຳແໜ່ງ</label><select id="ee_pos">'+positionOptions(e.position||POSITIONS[0])+'</select></div></div>'+
+    '<div class="field"><label>ເພດ</label><select id="ee_gender"><option value=""'+(!e.gender?' selected':'')+'>-</option><option value="male"'+(e.gender==="male"?' selected':'')+'>ຊາຍ</option><option value="female"'+(e.gender==="female"?' selected':'')+'>ຍິງ</option></select></div>'+
     '<div class="grid grid-2"><div class="field"><label>ບົດບາດ</label><select id="ee_role">'+roleOptions(e.role)+'</select></div><div class="field"><label>ສິດວັນລາພັກຜ່ອນ/ປີ</label><input type="number" id="ee_quota" value="'+(e.quotaAnnual||0)+'" step="0.5"></div></div>'+
     '<div class="field"><label>ສິດວັນລາປ່ວຍ/ປີ (ປະໄວ້ວ່າງ = ຍັງບໍ່ກຳນົດ)</label><input type="number" id="ee_sick" min="0" step="0.5" value="'+(e.quotaSick==null?'':e.quotaSick)+'"></div>'+
     '<div class="grid grid-2"><div class="field"><label>ບໍລິສັດ (ນິຕິບຸກຄົນ)</label><select id="ee_company">'+companyOptions(e.company||"")+'</select></div>'+
     '<div class="field"><label>ວັນຍົກມາຈາກປີກາຍ (ໃຊ້ໄດ້ສະເພາະປີ '+quotaInfo(e).year+')</label><input type="number" id="ee_carry" min="0" step="0.5" value="'+quotaInfo(e).carry+'"><div class="faint">ປີກາຍເຫຼືອ '+quotaInfo(e).lastRemain+' ມື້ (ຕາມສິດປະຈຸບັນ). HR ຕັດສິນໃຈຈຳນວນຍົກມາ</div></div></div>'+
     '<div class="grid grid-2"><div class="field"><label>ວັນເກີດ (ບໍ່ບັງຄັບ)</label><input type="date" id="ee_bday" value="'+(e.birthDate||"")+'"></div><div class="field"><label>ວັນເລີ່ມເຮັດວຽກ (ບໍ່ບັງຄັບ)</label><input type="date" id="ee_hired" value="'+(e.hireDate||"")+'"></div></div>'+
+    '<h3 style="margin-top:18px">ຂໍ້ມູນເພີ່ມເຕີມ (ບໍ່ບັງຄັບ)</h3>'+
+    '<div class="grid grid-2"><div class="field"><label>ເບີໂທຕິດຕໍ່</label><input type="text" id="ee_phone" value="'+esc(e.phone||"")+'"></div><div class="field"><label>ອີເມວ</label><input type="email" id="ee_email" value="'+esc(e.email||"")+'"></div></div>'+
+    '<div class="grid grid-2"><div class="field"><label>ນ້ຳໜັກ (ກລ.)</label><input type="number" step="0.1" id="ee_weight" value="'+(e.weight||"")+'"></div><div class="field"><label>ລວງສູງ (ຊມ.)</label><input type="number" step="0.1" id="ee_height" value="'+(e.height||"")+'"></div></div>'+
+    '<div class="grid grid-2"><div class="field"><label>ທີ່ຢູ່ປັດຈຸບັນ</label><input type="text" id="ee_address" value="'+esc(e.address||"")+'"></div><div class="field"><label>ສະຖານະ</label><select id="ee_marital"><option value=""'+(!e.maritalStatus?' selected':'')+'>-</option><option value="single"'+(e.maritalStatus==="single"?' selected':'')+'>ໂສດ</option><option value="married"'+(e.maritalStatus==="married"?' selected':'')+'>ແຕ່ງງານແລ້ວ</option></select></div></div>'+
+    '<div class="field"><label>ປະຫວັດການສຶກສາ (ຈົບຫຍັງມາ)</label><textarea id="ee_education" rows="2">'+esc(e.education||"")+'</textarea></div>'+
+    '<div class="field"><label>ປະສົບການເຮັດວຽກ (ສູງສຸດ 3 ແຫ່ງ)</label>'+[0,1,2].map(function(i){
+      var x=(e.workExperience&&e.workExperience[i])||{};
+      return '<div style="border:1px solid var(--line,#2a3a44);border-radius:10px;padding:10px;margin-bottom:8px">'+
+        '<div class="grid grid-2"><input type="text" id="ee_exp'+i+'_company" placeholder="ຊື່ບໍລິສັດ" value="'+esc(x.company||"")+'"><input type="text" id="ee_exp'+i+'_position" placeholder="ຕຳແໜ່ງ" value="'+esc(x.position||"")+'"></div>'+
+        '<input type="text" id="ee_exp'+i+'_duties" placeholder="ໜ້າທີ່ຮັບຜິດຊອບ" value="'+esc(x.duties||"")+'" style="margin-top:6px;width:100%">'+
+        '<div class="grid grid-2" style="margin-top:6px"><div><label class="faint">ແຕ່ວັນທີ່</label><input type="date" id="ee_exp'+i+'_from" value="'+(x.dateFrom||"")+'"></div><div><label class="faint">ຫາວັນທີ່</label><input type="date" id="ee_exp'+i+'_to" value="'+(x.dateTo||"")+'"></div></div>'+
+      '</div>';
+    }).join("")+'</div>'+
+    '<div class="field"><label>ຄວາມສາມາດພິເສດ</label><textarea id="ee_skills" rows="2">'+esc(e.specialSkills||"")+'</textarea></div>'+
+    '<div class="field"><label>ທັກສະການນຳໃຊ້ຄອມພິວເຕີ</label><textarea id="ee_computer" rows="2">'+esc(e.computerSkills||"")+'</textarea></div>'+
+    '<div class="field"><label>ໃບຂັບຂີ່</label><div class="checkline"><input type="checkbox" id="ee_car"'+(e.drivingCar?' checked':'')+'><span>ຂັບລົດໃຫຍ່ໄດ້</span></div><div class="checkline"><input type="checkbox" id="ee_moto"'+(e.drivingMoto?' checked':'')+'><span>ຂັບລົດຈັກໄດ້</span></div></div>'+
+    '<div class="grid grid-2"><div class="field"><label>ກິລາ/ງານອະດິເລກທີ່ມັກ</label><input type="text" id="ee_hobby" value="'+esc(e.hobbies||"")+'"></div><div class="field"><label>ນິໄສເປັນຄົນ</label><input type="text" id="ee_personality" value="'+esc(e.personality||"")+'"></div></div>'+
     '<div class="row"><button type="button" class="btn" data-action="closeModalBtn" style="flex:1">ຍົກເລີກ</button>'+
     '<button type="button" class="btn btn-primary" data-action="saveEmp" data-id="'+id+'" style="flex:1">ບັນທຶກ</button></div>';
 }
@@ -2533,6 +3098,11 @@ function bindModal(){
   if(confirmReject) confirmReject.addEventListener("click", function(){
     var reason = document.getElementById("rejectReason").value.trim();
     doReject(confirmReject.getAttribute("data-id"), reason);
+  });
+  var confirmOtReject = document.querySelector('[data-action="confirmOtReject"]');
+  if(confirmOtReject) confirmOtReject.addEventListener("click", function(){
+    var reason = document.getElementById("otRejectReason").value.trim();
+    doOtReject(confirmOtReject.getAttribute("data-id"), reason);
   });
   var ack = document.getElementById("ackConflict");
   if(ack) ack.addEventListener("change", function(){
@@ -2547,13 +3117,38 @@ function bindModal(){
   if(dlPrev) dlPrev.addEventListener("click", function(){
     var m = state.modal; dlPrev.disabled=true; dlPrev.textContent="ກຳລັງບັນທຶກ...";
     var bytes; try{ bytes = xlWorkbook(m.sheets); }catch(err){ toast("ບັນທຶກບໍ່ສຳເລັດ", true); dlPrev.disabled=false; dlPrev.textContent="ດາວໂຫຼດ Excel (.xlsx)"; return; }
-    var fname = m.from+"_"+(m.dept==="all"?"AllDepts":"Dept")+"_LeaveSummary_to"+m.to+"_v1.xlsx";
+    var fname = m.from+"_"+(m.dept==="all"?"AllDepts":"Dept")+"_"+(m.kind==="ot"?"OTSummary":"LeaveSummary")+"_to"+m.to+"_v1.xlsx";
     window.claude.use("downloads").then(function(dl){
       if(!dl){ toast("ບໍ່ສາມາດດາວໂຫຼດໃນໜ້ານີ້", true); dlPrev.disabled=false; dlPrev.textContent="ດາວໂຫຼດ Excel (.xlsx)"; return; }
       dl.save({filename:fname, data:bytes}).then(function(){ toast("ບັນທຶກໄຟລ໌ແລ້ວ: "+fname); state.modal=null; render(); }, function(e){ if(!e||e.code!=="declined") toast("ບັນທຶກບໍ່ສຳເລັດ", true); dlPrev.disabled=false; dlPrev.textContent="ດາວໂຫຼດ Excel (.xlsx)"; });
     });
   });
   bindPinModals();
+  var savePolicy = document.querySelector('[data-action="savePolicy"]');
+  if(savePolicy) savePolicy.addEventListener("click", function(){
+    var id = savePolicy.getAttribute("data-id");
+    var title = document.getElementById("pl_title").value.trim();
+    var body = document.getElementById("pl_body").value;
+    if(!title){ toast("ກະລຸນາໃສ່ຊື່ຫົວຂໍ້", true); return; }
+    var emp = me();
+    if(id==="new"){
+      state.db.collection("policies").add({
+        title: title, body: body, order: state.policies.length,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), updatedBy: emp.firstName+" "+emp.lastName
+      }).then(function(){ toast("ເພີ່ມຫົວຂໍ້ແລ້ວ"); });
+    } else {
+      state.db.collection("policies").doc(id).update({
+        title: title, body: body, updatedAt: new Date().toISOString(), updatedBy: emp.firstName+" "+emp.lastName
+      }).then(function(){ toast("ບັນທຶກແລ້ວ"); });
+    }
+    state.modal=null; render();
+  });
+  var confirmDelPolicy = document.querySelector('[data-action="confirmDelPolicy"]');
+  if(confirmDelPolicy) confirmDelPolicy.addEventListener("click", function(){
+    var id = confirmDelPolicy.getAttribute("data-id");
+    state.db.collection("policies").doc(id).delete().then(function(){ toast("ລຶບແລ້ວ"); });
+    state.policyOpenId = null; state.modal=null; render();
+  });
   document.querySelectorAll('[data-action="goNotif"]').forEach(function(b){ b.addEventListener("click", function(){ var t=b.getAttribute("data-tab"); state.modal=null; if(t) state.view=t; render(); }); });
   var delBtn = document.querySelector('[data-action="confirmDelEmp"]');
   if(delBtn) delBtn.addEventListener("click", function(){
@@ -2584,7 +3179,30 @@ function bindModal(){
       birthDate: document.getElementById("ee_bday").value || null,
       hireDate: document.getElementById("ee_hired").value || null,
       carryOver: Math.max(0, parseFloat(document.getElementById("ee_carry").value)||0),
-      carryYear: new Date().getFullYear()
+      carryYear: new Date().getFullYear(),
+      gender: document.getElementById("ee_gender").value || null,
+      phone: document.getElementById("ee_phone").value.trim() || null,
+      email: document.getElementById("ee_email").value.trim() || null,
+      weight: document.getElementById("ee_weight").value===""? null : parseFloat(document.getElementById("ee_weight").value),
+      height: document.getElementById("ee_height").value===""? null : parseFloat(document.getElementById("ee_height").value),
+      address: document.getElementById("ee_address").value.trim() || null,
+      maritalStatus: document.getElementById("ee_marital").value || null,
+      education: document.getElementById("ee_education").value.trim() || null,
+      workExperience: [0,1,2].map(function(i){
+        return {
+          company: document.getElementById("ee_exp"+i+"_company").value.trim(),
+          position: document.getElementById("ee_exp"+i+"_position").value.trim(),
+          duties: document.getElementById("ee_exp"+i+"_duties").value.trim(),
+          dateFrom: document.getElementById("ee_exp"+i+"_from").value || null,
+          dateTo: document.getElementById("ee_exp"+i+"_to").value || null
+        };
+      }).filter(function(x){ return x.company||x.position||x.duties||x.dateFrom||x.dateTo; }),
+      specialSkills: document.getElementById("ee_skills").value.trim() || null,
+      computerSkills: document.getElementById("ee_computer").value.trim() || null,
+      drivingCar: document.getElementById("ee_car").checked,
+      drivingMoto: document.getElementById("ee_moto").checked,
+      hobbies: document.getElementById("ee_hobby").value.trim() || null,
+      personality: document.getElementById("ee_personality").value.trim() || null
     }).then(function(){
       var pd=pinDoc(id), need=pinLen({role:newRole});
       if(pd && pd.len!==need){
